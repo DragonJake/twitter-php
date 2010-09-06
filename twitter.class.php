@@ -1,5 +1,8 @@
 <?php
 
+require_once(dirname(__FILE__) . '/lib/twitteroauth.php');
+
+
 /**
  * Twitter for PHP - library for sending messages to Twitter and receiving status updates.
  *
@@ -26,55 +29,67 @@ class Twitter
 	const ATOM = 48;
 	/**#@-*/
 
+	/**#@+ Authorization states {@link Twitter::__construct()} */
+	const AUTH_ACCESS = 200;
+	const AUTH_REDIRECT = 301;
+	/**#@-*/
+
 	/** @var int */
 	public static $cacheExpire = 1800; // 30 min
 
 	/** @var string */
 	public static $cacheDir;
 
-	/** @var string  user name */
-	private $user;
-
-	/** @var string  password */
-	private $pass;
+	/** @var TwitterOAuth */
+	private $oauth;
 
 
 
 	/**
-	 * Creates object using your credentials.
-	 * @param  string  user name
-	 * @param  string  password
+	 * Creates object using application and request/access keys.
+	 * @param  string  app key
+	 * @param  string  app secret
+	 * @param  string  access key
+	 * @param  string  access secret
 	 * @throws TwitterException when CURL extension is not loaded
+	 * @throws TwitterAuthException to signalize individual authorization steps
 	 */
-	public function __construct($user = NULL, $pass = NULL)
+	public function __construct($appKey, $appSecret, $accessKey = NULL, $accessSecret = NULL)
 	{
-		if (!extension_loaded('curl')) {
-			throw new TwitterException('PHP extension CURL is not loaded.');
-		}
+		if (!$accessKey || !$accessSecret) {
+			$sess = &$_SESSION['__TWT'];
+			if (!$sess['request_key'] || !$sess['request_secret']) {
+				$oauth = new TwitterOAuth($appKey, $appSecret);
+				$token = $oauth->getRequestToken();
+				$sess['request_key'] = $token['oauth_token'];
+				$sess['request_secret'] = $token['oauth_token_secret'];
 
-		$this->user = $user;
-		$this->pass = $pass;
+				$url = $oauth->getAuthorizeURL($sess['request_key']);
+				throw new TwitterAuthException($url, self::AUTH_REDIRECT);
+			} else {
+				$oauth = new TwitterOAuth($appKey, $appSecret, $sess['request_key'], $sess['request_secret']);
+				unset($_SESSION['__TWT']);
+
+				$info = $oauth->getAccessToken();
+				$accessKey = $info['oauth_token'];
+				$accessSecret = $info['oauth_token_secret'];
+
+				throw new TwitterAuthException(NULL, self::AUTH_ACCESS, $accessKey, $accessSecret);
+			}
+		} else {
+			$this->oauth = new TwitterOAuth($appKey, $appSecret, $accessKey, $accessSecret);
+		}
 	}
 
 
 
 	/**
-	 * Tests if user credentials are valid.
+	 * Checks authorization.
 	 * @return boolean
-	 * @throws TwitterException
 	 */
-	public function authenticate()
+	public function isAuthorized()
 	{
-		try {
-			$xml = $this->httpRequest('http://twitter.com/account/verify_credentials.xml');
-			return !empty($xml->id);
-
-		} catch (TwitterException $e) {
-			if ($e->getCode() === 401) {
-				return FALSE;
-			}
-			throw $e;
-		}
+		return ($this->oauth instanceof TwitterOAuth);
 	}
 
 
@@ -92,7 +107,7 @@ class Twitter
 		}
 
 		$xml = $this->httpRequest(
-			'https://twitter.com/statuses/update.xml',
+			'https://api.twitter.com/1/statuses/update.xml',
 			array('status' => $message)
 		);
 		return $xml->id ? (string) $xml->id : FALSE;
@@ -105,10 +120,11 @@ class Twitter
 	 * @param  int    timeline (ME | ME_AND_FRIENDS | REPLIES | ALL) and optional format (XML | JSON | RSS | ATOM)
 	 * @param  int    number of statuses to retrieve
 	 * @param  int    page of results to retrieve
+	 * @param  bool   include retweets?
 	 * @return mixed
 	 * @throws TwitterException
 	 */
-	public function load($flags = self::ME, $count = 20, $page = 1)
+	public function load($flags = self::ME, $count = 20, $page = 1, $retweets = FALSE)
 	{
 		static $timelines = array(self::ME => 'user_timeline', self::ME_AND_FRIENDS => 'friends_timeline', self::REPLIES => 'mentions', self::ALL => 'public_timeline');
 		static $formats = array(self::XML => 'xml', self::JSON => 'json', self::RSS => 'rss', self::ATOM => 'atom');
@@ -120,7 +136,7 @@ class Twitter
 			throw new InvalidArgumentException;
 		}
 
-		return $this->cachedHttpRequest("http://twitter.com/statuses/" . $timelines[$flags & 0x0F] . '.' . $formats[$flags & 0x30] . "?count=$count&page=$page");
+		return $this->cachedHttpRequest("http://api.twitter.com/1/statuses/" . $timelines[$flags & 0x0F] . '.' . $formats[$flags & 0x30] . "?count=$count&page=$page&include_rts=$retweets");
 	}
 
 
@@ -133,7 +149,7 @@ class Twitter
 	 */
 	public function destroy($id)
 	{
-		$xml = $this->httpRequest("http://twitter.com/statuses/destroy/$id.xml", array('id' => $id));
+		$xml = $this->httpRequest("http://api.twitter.com/1/statuses/destroy/:$id.xml", array('id' => $id));
 		return $xml->id ? (string) $xml->id : FALSE;
 	}
 
@@ -170,41 +186,20 @@ class Twitter
 	 */
 	private function httpRequest($url, $postData = NULL)
 	{
-		$curl = curl_init();
-		curl_setopt($curl, CURLOPT_URL, $url);
-		if ($this->user) {
-			curl_setopt($curl, CURLOPT_USERPWD, "$this->user:$this->pass");
-		}
-		curl_setopt($curl, CURLOPT_HEADER, FALSE);
-		curl_setopt($curl, CURLOPT_TIMEOUT, 20);
-		curl_setopt($curl, CURLOPT_SSL_VERIFYPEER, 0);
-		curl_setopt($curl, CURLOPT_HTTPHEADER, array('Expect:'));
-		curl_setopt($curl, CURLOPT_RETURNTRANSFER, TRUE); // no echo, just return result
-		if ($postData) {
-			curl_setopt($curl, CURLOPT_POST, TRUE);
-			curl_setopt($curl, CURLOPT_POSTFIELDS, $postData);
+		if (!($this->oauth instanceof TwitterOAuth)) {
+			throw new TwitterException('Not authorized.');
 		}
 
-		$result = curl_exec($curl);
-		if (curl_errno($curl)) {
-			throw new TwitterException('Server error: ' . curl_error($curl));
-		}
-
-		$type = curl_getinfo($curl, CURLINFO_CONTENT_TYPE);
-		if (strpos($type, 'xml')) {
-			$payload = @simplexml_load_string($result); // intentionally @
-
-		} elseif (strpos($type, 'json')) {
+		$result = $this->oauth->oAuthRequest($url, ($postData ? 'POST' : 'GET'), $postData);
+		if (strpos($url, 'json')) {
 			$payload = @json_decode($result); // intentionally @
+
+		} else {
+			$payload = @simplexml_load_string($result); // intentionally @
 		}
 
 		if (empty($payload)) {
 			throw new TwitterException('Invalid server response');
-		}
-
-		$code = curl_getinfo($curl, CURLINFO_HTTP_CODE);
-		if ($code >= 400) {
-			throw new TwitterException(isset($payload->error) ? $payload->error : "Server error #$code", $code);
 		}
 
 		return $payload;
@@ -249,9 +244,14 @@ class Twitter
 	 * Shortens URL using http://is.gd API.
 	 * @param  array
 	 * @return string
+	 * @throws TwitterException
 	 */
 	private function shortenUrl($m)
 	{
+		if (!extension_loaded('curl')) {
+			throw new TwitterException('PHP extension CURL is not loaded.');
+		}
+		
 		$curl = curl_init();
 		curl_setopt($curl, CURLOPT_URL, 'http://is.gd/api.php?longurl=' . urlencode($m[0]));
 		curl_setopt($curl, CURLOPT_HEADER, FALSE);
@@ -271,4 +271,41 @@ class Twitter
  */
 class TwitterException extends Exception
 {
+}
+
+
+
+/**
+ * An exception generated by authorization process.
+ */
+class TwitterAuthException extends TwitterException
+{
+	private $uri;
+
+	private $accessKey;
+
+	private $accessSecret;
+
+	public function __construct($uri, $code, $accessKey = NULL, $accessSecret = NULL)
+	{
+		parent::__construct(NULL, $code);
+		$this->uri = $uri;
+		$this->accessKey = $accessKey;
+		$this->accessSecret = $accessSecret;
+	}
+
+	public function getUri()
+	{
+		return $this->uri;
+	}
+
+	public function getAccessKey()
+	{
+		return $this->accessKey;
+	}
+
+	public function getAccessToken()
+	{
+		return $this->accessSecret;
+	}
 }
