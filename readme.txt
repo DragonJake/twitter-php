@@ -22,9 +22,9 @@ Requirements
 Usage
 -----
 
-Create object using your credentials (user name and password)
+Create object using application and request/access keys
 
-	$twitter = new Twitter($userName, $password);
+	$twitter = new Twitter($appKey, $appSecret, $accessKey, $accessSecret);
 
 The send() method updates your status. The message must be encoded in UTF-8:
 
@@ -73,11 +73,48 @@ The returned result is a PHP array:
 
 
 
+Authorization
+-------------
+
+To perform a complete OAuth authorization you need to prepare your script
+to handle few reloads:
+
+	try {
+		$twitter = new Twitter($appKey, $appSecret);
+	} catch (TwitterAuthException $e) {
+		// the exception handles the three-phase authorization
+
+		if ($e->getCode() === Twitter::AUTH_REDIRECT) {
+
+			// STEP 1
+			header('Location: ' . $e->getUri(), TRUE, 301);
+			// or just print the link
+			// echo "Please continue to: ", $e->getUri();
+
+		} elseif ($e->getCode() === Twitter::AUTH_ACCESS) {
+
+			// STEP 2: after redirecting back from Twitter API
+			// we have the access keys stored in:
+			// $e->getAccessKey(); and
+			// $e->getAccessSecret();
+		}
+	}
+
+	// STEP 3: after obtaining access keys
+
+We can safely re-instantiate the object with proper access keys now.
+They should be stored at most to a session.
+
+
+
+
 Files
 -----
-readme.txt          - This file.
-license.txt         - The license for this software (New BSD License).
-twitter.class.php   - The core Twitter class source.
-examples/send.php   - Example sending message to Twitter.
-examples/load.php   - Example loading statuses from Twitter.
-examples/search.php - Example searching on Twitter.
+readme.txt           - This file.
+license.txt          - The license for this software (New BSD License).
+twitter.class.php    - The core Twitter class source.
+examples/send.php    - Example sending message to Twitter.
+examples/load.php    - Example loading statuses from Twitter.
+examples/search.php  - Example searching on Twitter.
+lib/OAuth.php        - Pure OAuth library
+lib/twitteroauth.php - Abraham Williams' Twitter OAuth library
